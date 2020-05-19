@@ -1,0 +1,617 @@
+#Shiny App for Pendleton Cat Website
+
+#Loading Libraries
+library(shinydashboard)
+library(shiny)
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(e1071)
+library(caTools)
+library(ranger)
+library(glmnet)
+library(kernlab)
+library(ggnewscale)
+library(png)
+library(grid)
+library(slickR)
+set.seed(29)
+
+#Creating Datasets
+
+##Cat_Calls
+cat_calls<-data.frame(Cat=c(rep("James",100),rep("Amelia",100)))
+cat_calls$Volume<-round(c(rnorm(33,50,10),runif(33,60,75),rnorm(34,85,15),
+                          rnorm(33,80,10),rnorm(33,85,20),rnorm(34,45,5)))
+cat_calls$Duration<-c(rnorm(33,2),rnorm(33,2,1.5),runif(34,.1,1),
+                      runif(33,.1,1),rnorm(33,.6),rnorm(34,4))
+cat_calls$Duration<-ifelse(cat_calls$Duration>0,cat_calls$Duration,cat_calls$Duration*(-1))
+cat_calls$Pity<-round(c(rnorm(33,2,1),rnorm(33,8,2),rnorm(34,5,3),
+                        runif(33,1,3),rnorm(33,8,2),rnorm(34,5,2)))
+cat_calls$Pity<-ifelse(cat_calls$Pity<0,
+                       1,
+                       ifelse(cat_calls$Pity>10,
+                              10,
+                              cat_calls$Pity))
+
+
+cluster_james<-cat_calls%>%
+  filter(Cat=="James")%>%
+  select(2:4)%>%
+  dist()%>%
+  hclust(method="complete")%>%
+  cutree(k=3)
+cluster_amelia<-cat_calls%>%
+  filter(Cat=="Amelia")%>%
+  select(2:4)%>%
+  dist()%>%
+  hclust(method="complete")%>%
+  cutree(k=3)
+cat_calls$Cluster<-factor(c(cluster_james,cluster_amelia),levels=c("1","2","3"))
+
+##Location Analysis
+j_path<-read.csv("James_path.csv")
+a_path<-read.csv("Amelia_path.csv")
+j_path<-j_path[1:721,1:2]
+a_path<-a_path[1:721,1:2]
+paths<-bind_rows(list(James=j_path,Amelia = a_path),.id="Cat")
+paths$Minutes<-rep(seq(0,1440,2),2)
+paths$Hours<-paths$Minutes/60
+
+floorplan<-readPNG("Floorplan.png")
+floorplan_empty<-readPNG("floorplan_empty.png")
+grid_paths_a<-round(select(filter(paths,Cat=="Amelia"),X,Y),-1)
+grid_paths_j<-round(select(filter(paths,Cat=="James"),X,Y),-1)
+tabled_paths_a<-as.data.frame(table(grid_paths_a))
+tabled_paths_j<-as.data.frame(table(grid_paths_j))
+tabled_paths_a[tabled_paths_a==0]<-NA
+tabled_paths_j[tabled_paths_j==0]<-NA
+hm_both<-ggplot(mapping=aes(x=X,y=Y))+
+   geom_raster(data=tabled_paths_a,aes(fill=Freq),alpha=1,interpolate=TRUE)+
+   scale_fill_gradient2('Minutes Spent, Amelia', 
+                        low = "white", high = "red",
+                        na.value="transparent")+
+   new_scale_fill()+
+   geom_raster(data=tabled_paths_j,aes(fill=Freq),alpha=.5,interpolate=TRUE)+
+   scale_fill_gradient2("Minutes Spent, James",
+                        low="white",high="green",
+                        na.value="transparent")+
+   annotation_custom(rasterGrob(floorplan_empty, 
+                                width = unit(1,"npc"), 
+                                height = unit(1,"npc")), 
+                     -Inf, Inf, -Inf, Inf)+
+   theme_void()
+hm_j<-ggplot(mapping=aes(x=X,y=Y))+
+   geom_raster(data=tabled_paths_j,aes(fill=Freq),alpha=.5,interpolate=TRUE)+
+   scale_fill_gradient2("Minutes Spent, James",
+                        low="white",high="green",
+                        na.value="transparent")+
+   annotation_custom(rasterGrob(floorplan_empty, 
+                                width = unit(1,"npc"), 
+                                height = unit(1,"npc")), 
+                     -Inf, Inf, -Inf, Inf)+
+   theme_void()
+hm_a<-ggplot(mapping=aes(x=X,y=Y))+
+   geom_raster(data=tabled_paths_a,aes(fill=Freq),alpha=.5,interpolate=TRUE)+
+   scale_fill_gradient2("Minutes Spent, Amelia",
+                        low="white",high="red",
+                        na.value="transparent")+
+   annotation_custom(rasterGrob(floorplan_empty, 
+                                width = unit(1,"npc"), 
+                                height = unit(1,"npc")), 
+                     -Inf, Inf, -Inf, Inf)+
+   theme_void()
+
+
+##Cat Classification
+
+cat_class<-data.frame(Cat=c(rep("James",100),rep("Amelia",100)))
+cat_class$Volume<-round(c(rnorm(100,50,30),runif(100,40,75)))
+cat_class$Duration<-c(rnorm(100,2),rnorm(100,2,1.2))
+cat_class$Duration<-ifelse(cat_class$Duration>0,
+                           cat_class$Duration,
+                           cat_class$Duration*(-1))
+cat_class$Pity<-round(c(rnorm(100,5,5),rnorm(100,6,2)))
+cat_class$Pity<-ifelse(cat_class$Pity<0,
+                       1,
+                       ifelse(cat_class$Pity>10,
+                              10,
+                              cat_class$Pity))
+cat_class$Surprise<-round(rnorm(200,5,0.1),1)
+cat_class$Hissiness<-round(rnorm(100,2,4),rnorm(100,4,3))
+cat_class$Anger<-cat_class$Hissiness*runif(200,1.9,2.1)
+cat_class$Purr<-cat_class$Duration^runif(200,1.9,2.1)
+cat_class$Yawn<-c(rnorm(100,3,2),rnorm(100,6,2))
+cat_class$Pitch<-c(rnorm(100,1000,1000),rnorm(100,1500,1000))
+cat_class$Adorableness<-c(rnorm(100,3,3),rnorm(100,6,2))
+
+#UI
+ui<-dashboardPage(
+  dashboardHeader(title="Shiny Cats!"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("What is this website?",tabName="description"),
+      menuItem("A Long Cat's Journey into Night", tabName = "paths",startExpanded = F,
+               menuSubItem("Caturday Night Live",tabName="gif_page"),
+               menuSubItem("Cat on a Hot Tin Roof",tabName="heatmap_page")),
+      menuItem("Kitty Clustering", tabName = "catcalls"),
+      menuItem("Meow-chine Learning",tabName = "catclasspages",startExpanded=F,
+               menuSubItem("Build a Purrdictive Model",tabName="catclass"),
+               menuSubItem("Classify that Cat!",tabName="applymodel")),
+      menuItem("Who am I?",tabName="intro"),
+      menuItem("Show me the cali-code!",tabName="code")
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      tabItem(tabName="description",
+              box(status="primary",width=5,height=360,title="Hello, I'm Gus! And this is Amelia and James",
+                  slickROutput("slickr",width="100%"),
+                  ),
+              box(title="What is this website?",width=7,status="warning",height=360,
+                  paste("My name is Gus, and because of quarantine",
+                        "I have been spending an UNPRECEDENTED amount of time",
+                        "in my apartment with my two cats, James and Amelia.",
+                        "With all this free time, and an abundance of cats,",
+                        "I wanted to learn how to use shiny",
+                        "to share some of the skills I'm learning in R",
+                        "On this website, you can",
+                        "use R code I've written to analyze cat calls through",
+                        "unsupervised machine learning, integrate spatial and temporal",
+                        "data to analyze my cats favorite places in my apartment,",
+                        "and generate supervised machine learning models to classify cats",
+                        "by their calls. Mostly, I hope I can share a bit of the fun I had",
+                        "integrating my love of cats and data science in a goofy way."),
+                  )
+                 ),
+      tabItem(tabName='catcalls',
+        fluidRow(
+          box(status="primary",width=12,
+              title="Let's use unsupervised learning to study cat calls!",
+              paste("On this page, you can try to reveal patterns in a dataset of cat calls.",
+                    "Two hundred cat calls were recorded and scored by three variables: Volume, Duration, and heartbreaking Pity.",
+                    "You can plot this data to identify patterns between cats and use a K-Means clustering algorithm to",
+                    "reveal whether these variables can group cat calls in a meaningful way.")),
+          box(status="warning",title = "Plot Options",
+          h1("Select Your Cat",style = "font-size: 16px"),br()," ",
+            actionButton(inputId = "James",label = "James"),
+            actionButton(inputId = "Amelia",label="Amelia"), br(), " ",
+            h1("Select Your Variables",style="font-size: 16px"),br()," ",
+            selectInput(inputId = "xcol",label="X Axis",
+                        choices = names(cat_calls)[2:4]),
+            selectInput(inputId = "ycol",label="Y Axis",
+                        choices = names(cat_calls)[2:4],selected="Duration"),
+          actionButton(inputId="cluster",label="Cluster!"),
+          width=3),
+          box(plotOutput("plot"),width = 9,status="info"),
+          conditionalPanel(condition="input.cluster!=0",
+                         box(title="So what do these clusters mean?", width=3,background = "teal",
+              actionButton(inputId = "cluster_button",label="Show me!"))),
+          conditionalPanel(condition="input.cluster_button!=0",
+              box(width=9,status="success",
+                  paste("You used a K-means clustering algorithm",
+               "to identify patterns in cat call data, and determined three main clusters",
+               "of cat calls.", "Do these clusters mean anything?",
+               "Going back to the data, you see that cluster one calls",
+               "happen at 7:00am and 8:00pm - a dinnertime cluster!",
+               "Cluster two calls and cluster three calls only occur when owners are present,",
+               "but cluster two calls are notably less loud for both cats;",
+               "you hypothesize cluster two calls are asking for attention,",
+               "while cluster three calls are loud, angry calls in reaction to",
+               "being picked up. Looks like you need to do some more testing to find out!",
+               sep=" ")
+              )
+              )
+              )
+        )
+        , 
+    tabItem(tabName = 'gif_page',
+            fluidRow(
+               box(status="primary",title="Where are the cats going?",width=12,
+                   paste("This page shows some silliness you can do in ggplot using the gganimate package.",
+                         "First I made fake data showing each cat's location in our apartment throughout the day on a 2-minute scale",
+                         "using QGIS. Then I took these coordinates into R and animated them to show a timelapse",
+                         "of our cats napping, running, and playing with each other.",sep=" "))),
+            fluidRow(style="height: 200px",
+               column(width=4,
+                      box(width=12,title="Meet our Stars!",background="blue",height="40px"),
+               box(title="Amelia",width=6,height="200px",
+                            imageOutput("amelia_round"),
+                  tags$style(type="text/css", 
+                              "#amelia_round img{width=max-width: 100%; width: 100%; height: auto}")),
+               box(title="James",width=6,height="200px",
+                   imageOutput("james_round"),
+                   tags$style(type="text/css", 
+                              "#james_round img{width=max-width: 100%; width: 100%; height: auto}"))),
+               column(width=8,
+                  box(title="Follow the cats' movements through a typical day!",width=12,status="primary",
+                     imageOutput("cat_gif"),
+                   tags$style(type="text/css", 
+                             "#cat_gif img{width=max-width: 100%; width: 100%; height: auto}")))
+            )),
+    tabItem(tabName="heatmap_page",
+            fluidRow(
+               box(status="primary",title="How can we visualize spatial and temporal data?",width=12,
+                   paste("The focus here is to determine where each cat spends the most time during the day.",
+                         "The animation was fun, but a bit confusing. Instead, let's use a geom_raster()",
+                         "layer in ggplot to compare where the cats spend their days.",
+                         "Brighter colors on the heatmap indicate areas where the cats spend lots of time.",sep=" ")),
+               box(status="info",title="Select your Cat!",width=3,
+                   actionButton(inputId = "james_hm",label="James"),
+                   actionButton(inputId="amelia_hm",label="Amelia"),
+                   actionButton(inputId="both_hm",label="Both")),
+               box(status="warning",title="This heatmap shows where our cats like to hang out",width=9,
+                   plotOutput("heatmap"))
+            )),
+    tabItem(tabName='catclass',
+            fluidRow(
+              box(status="primary",title="Build a Supervised Machine Learning Model...for Cats!",width=12,
+                  paste("On this page, you can easily build four basic types of machine learning models",
+                        "to determine which cat is crying based on a mix of predictors. Try to build the ",
+                        "strongest model you can by optimizing accuracy or 'area under the curve' (AUC).",
+                        "One request: when adding preprocessing steps, add only in order: i.e. you can ",
+                        "center and then scale, but not scale and then center.",
+                        "Once your model is done, go to 'Classify that Cat!' to practice using it!",sep=" ")),
+              box(status="warning",title="Build Your Model",
+                  selectInput(inputId="preds",label="Predictors (select multiple)",
+                              choices=names(cat_class[2:11]),multiple=TRUE),
+                  selectInput(inputId="model",label="Model",
+                              choices=list("GLM"="glm","GLMNet"="glmnet",
+                                           "Random Forest"="ranger","SVM Linear"="svmLinear")),
+                  selectInput(inputId = "preprocess",label="PreProcessing (must select in order)",
+                              choices=list("center","scale","pca"),multiple=TRUE),
+                  numericInput(inputId = "folds",label="Select Cross-Validation Folds",
+                               value=5,min=0,max=20),
+                  selectInput(inputId = "a_or_r",label="Selection Criteria",
+                              choices=list("Accuracy","AUROC"="ROC")),
+                  actionButton(inputId="updatemodel",label="Run Model!"),
+                  width=4),
+              box(title="Model Output",width=4,height=400,status="info",
+                  textOutput("model_console")),
+              tags$style(type="text/css", "#model_console {white-space: pre-wrap;
+                         font-size: 20px}"),
+              box(title="Confusion Matrix",width=4,status="info",
+                  tableOutput("confusion"))),
+              fluidRow(box(title="ROC Plot",width=6,status="info",
+                  plotOutput("ROCplot")),
+              box(title="Tuning Plot",width=6,status="info",
+                  plotOutput("tuneplot"))),
+              fluidRow(box(title="Model Comparison",width=12,status="success",
+                  tableOutput("model_table"))
+            )),
+    tabItem(tabName="applymodel",
+            fluidRow(box(title="It's time to apply your model!",status="info",width=4,height=540,
+                conditionalPanel(condition="input.updatemodel!=0",
+                                 "Now that you've built a predictive model, let's see how well it can predict a 'wild' call!"), br(),br(),
+                conditionalPanel(condition="input.updatemodel==0",
+                                 "Oh no! Doesn't look like you have a model yet. Go to the 'Purrdictive Model' page to build one!"),
+                conditionalPanel(condition="input.updatemodel!=0",
+                                 actionButton(inputId="catcry",label="Observe Call"))),
+            column(width=4,
+                   conditionalPanel(condition="input.catcry!=0",
+                             box(status="warning",width=12,title="You Predict:",height=350,
+                                 imageOutput("predict",height="100px")),
+                                 tags$style(type="text/css", 
+                                            "#predict img{width=max-width: 100%; width: 100%; height: auto}"),
+                                 box(status="warning",width=12,height=150,title="But were you right?",
+                                     actionButton(inputId="truecat",label="Reveal true cat"))
+                )),
+            column(width=4,
+                   conditionalPanel(condition="input.truecat!=0",
+                                    box(status="success",width=12,title="The true cat was:",height=350,
+                                        imageOutput("jamesreveal"),
+                                        tags$style(type="text/css", 
+                                                   "#jamesreveal img{width=max-width: 100%; width: 100%; height: auto}")),
+                                        box(title="The Result:",width=12,status="success",height=150,
+                                            textOutput("revealtext")))),
+            
+            ),
+            fluidRow(
+               conditionalPanel(condition="input.catcry!=0",
+                                box(status="warning",width=12,title="These are the values you observed:",
+                                    tableOutput("mystery_cry")))
+            )),
+    tabItem(tabName="code",
+            box(title="Here's the code I used to create this document:",
+                br(),br(),
+                actionButton(inputId="codelink",label="Access Code on Github",icon=icon("github"),
+                             onclick="window.open('','_blank')")),
+    tabItem(tabName="intro",
+            box(width=5,status="primary",height="500px",
+               imageOutput("headshot")),
+            tags$style(type="text/css", 
+                       "#headshot img{width=max-width: 100%; width: 100%; height: 75}"),
+            box(width=7,status="success",
+                title="Augustus Pendleton: Microbiology - Geography - Data Science",
+                paste("Hello! Thanks for spending time on my page.",
+                      "I received my Bachelor's in Microbiology from the University of Minnesota",
+                      "and I am currently finishing my Master's in Geography from the",
+                      "National University of Ireland Galway as a Fulbright student.",
+                      "Due to COVID-19, I have returned to Washington, D.C.",
+                      "and I am actively job searching in the area.",
+                      "I hope to integrate the diverse research skills I've learned,",
+                      "including qualitative and quantitative data analysis,",
+                      "biological laboratory techniques, and science communication, to",
+                      "solve global problems related to climate change and sustainable development.",
+                      "I am always learning, and would love to connect further",
+                      "with other professionals working in these sectors.",
+                      "Feel free to connect with me or read more about my research below!",sep=" "),br(),br(),
+                actionButton(
+                   inputId="twitter",label="Twitter",icon=icon("twitter"),
+                   onclick="window.open('https://twitter.com/AugustusPendle1','_blank')"
+                ),
+                actionButton(
+                   inputId = "linkedin",label="LinkedIn",icon=icon("linkedin"),
+                   onclick="window.open('https://www.linkedin.com/in/augustus-pendleton-16266612a/','_blank')"
+                ),
+                actionButton(
+                   inputId="resume",label="Resume",icon=icon("file-alt"),
+                   onclick="window.open('https://drive.google.com/file/d/1FNZeOMtxWXmlhoCH_FanCSNGQ949fjIa/view?usp=sharing','_blank')"
+                )),
+            box(title="My Research",background="orange",width=5,
+                actionButton(
+                   inputId="seaweed",label="Seaweed Harvesting",icon=icon("seedling"),
+                   onclick="window.open('https://www.siliconrepublic.com/innovation/augustus-pendleton-nui-galway-seaweed-fulbright','_blank')"
+                ),br(),br(),
+                actionButton(
+                   inputId="micro",label="Metal-Reducing Bacteria",icon=icon("bolt"),
+                   onclick="window.open('https://aem.asm.org/content/85/16/e00852-19','_blank')"
+                )))
+      )
+      )
+)
+
+#Server
+
+server=function(input,output){
+   #Description Page
+   output$slickr<-renderSlickR({
+      imgs<-list("cats4.png","chistmas_cats.png","cats1.png","cats2.png","cats3.png")
+      slickR(imgs)
+   })
+  #Clustering Page
+ rv<-reactiveValues(data=filter(cat_calls,Cat=="James"))
+ observeEvent(input$James,{rv$data<-filter(cat_calls,Cat=="James")})
+ observeEvent(input$Amelia,{rv$data<-filter(cat_calls,Cat=="Amelia")})
+ output$plot<-renderPlot({
+    if(input$cluster%%2==0){
+       ggplot(data=rv$data,
+              aes_string(x=input$xcol,y=input$ycol))+
+          geom_point()+
+          theme_classic()+
+          theme(axis.title=element_text(size=20))
+    }else{
+   ggplot(data=rv$data,
+          aes_string(x=input$xcol,y=input$ycol,color="Cluster"))+
+     geom_point()+
+          theme_classic()+
+          theme(axis.title=element_text(size=20),
+                legend.title=element_text(size=16),
+                legend.text=element_text(size=12))+
+     stat_ellipse(aes_string(x=input$xcol,y=input$ycol,group="Cluster",
+                      fill="Cluster"),type="norm",geom="polygon",alpha=.25)}
+ })
+
+ #Cat Movement Pages
+ ##Cat Gif Page
+ output$amelia_round<-renderImage({
+    return(list(src = "amelia_round.png",contentType = "image/png"))
+ }, deleteFile = FALSE)
+ output$james_round<-renderImage({
+    return(list(src="james_round.png",contentType="image/png"))
+ }, deleteFile=FALSE)
+ output$cat_gif<-renderImage({
+    return(list(src="cat_paths.gif"))
+ }, deleteFile=FALSE)
+ 
+ #Cat Heat Map Page
+ hm<-reactiveValues(plot=NULL)
+ observeEvent(input$james_hm,{hm$plot<-hm_j})
+ observeEvent(input$amelia_hm,{hm$plot<-hm_a})
+ observeEvent(input$both_hm,{hm$plot<-hm_both})
+ output$heatmap<-renderPlot(hm$plot)
+ #Classification Page
+ control<-reactive({if(input$a_or_r=="Accuracy"){
+   trainControl(
+     method="cv",
+     number=input$folds,
+     verboseIter=TRUE)
+ }else{
+   trainControl(
+     method="cv",
+     number=input$folds,
+     verboseIter=TRUE,
+     summaryFunction=twoClassSummary,
+     classProbs=TRUE
+   )
+ }})
+ formula<-reactive({as.formula(paste("Cat~",paste(input$preds,collapse="+"),""))})
+ 
+ model<-eventReactive(input$updatemodel,{if(input$model=="glm"){
+   train(
+     formula(),
+     cat_class,
+     method="glm",
+     metric=input$a_or_r,
+     preProcess=input$preprocess,
+     trControl=control()
+   )
+ } else if(input$model=="glmnet"){
+   train(
+     formula(),
+     cat_class,
+     method="glmnet",
+     metric=input$a_or_r,
+     preProcess=input$preprocess,
+     tuneGrid = expand.grid(
+       alpha=c(0,.5,1),
+       lambda = seq(0.0001,1,length=20)
+     ),
+     trControl=control()
+   )
+ } else if(input$model=="ranger"){
+   train(
+     formula(),
+     cat_class,
+     method="ranger",
+     metric=input$a_or_r,
+     preProcess=input$preprocess,
+     tuneGrid=data.frame(
+        .mtry=c(2,4,6,8),
+        .splitrule=c("gini","extratrees"),
+        .min.node.size=5
+     ),
+     trControl=control()
+   )
+ } else{
+   train(
+     formula(),
+     cat_class,
+     method="svmLinear",
+     metric=input$a_or_r,
+     preProcess=input$preprocess,
+     trControl=control(),
+     tuneGrid = expand.grid(C = seq(.1, 2, length = 20))
+   )
+ }})
+  #Confusion Matrix Table
+ p_model_raw<-reactive({predict(model(),cat_class,type="raw")})
+ p_model_prob<-reactive({predict(model(),cat_class,type="prob")[1]})
+ cm<-reactive({confusionMatrix(p_model_raw(),factor(cat_class$Cat))})
+ t<-reactive({unname(table(p_model_raw(),cat_class$Cat))})
+ t_good<-reactive({
+    new_t<-t()
+    colnames(new_t)<-c("Act. Amelia","Act. James")
+    new_t})
+ metric<-reactive({
+   if(input$a_or_r=="Accuracy"){
+      sum(c(t_good()[1],t_good()[4]))/200
+   }else{
+     max(model()[["results"]]$ROC)
+   }
+ })
+ metricname<-reactive({
+   if(input$a_or_r=="Accuracy"){
+     "accuracy, or percentage of cases your model predicted correctly,"
+   }else{
+     "AUC (think of it like a letter grade),"
+   }
+ })
+ 
+ Accuracy<-reactive({c("Act. Amelia"=sum(c(t_good()[1],t_good()[4]))/200,"Act. James"=NA)})
+ Kappa<-reactive({c("Act. Amelia"=round(cm()$overall[2],2),"Act. James"=NA)})
+ Sens<-reactive({c("Act. Amelia"=round(cm()$byClass[1],2),"Act. James"=NA)})
+ Spec<-reactive({data=c("Act. Amelia"=round(cm()$byClass[2],2),"Act. James"=NA)})
+ Values<-c("Pred. Amelia","Pred. James","Accuracy","Kappa","Sensitivity","Specificity")
+ cfm<-reactive({cbind(Values,rbind(t_good(),Accuracy(),
+                     Kappa(),Sens(),Spec()))})
+ output$confusion<-renderTable(cfm(),na=" ")
+ #Console Output
+ output$model_console<-eventReactive(input$updatemodel,{
+   validate(
+      need(try(if(metric()>=.85){
+     paste("Great Job! Your model has a max", metricname(),"of",paste(metric(),",",sep=""), 
+     "which is really good! Check out the confusion matrix to",
+     "the right to learn more.",sep=" ")
+   } else if(metric()<.85&metric()>=.70){
+     paste("This model is ok. Your model has a max", metricname(),"of",paste(metric(),",",sep=""), 
+           "which is a great start! Check out the confusion matrix to",
+           "the right to learn more.",sep=" ")
+   }else{
+     paste("Blech - this model is not great!. Your model has a max", metricname(),"of",
+           paste(metric(),",",sep=""), 
+           "which is pretty bad! Check out the confusion matrix to",
+           "the right to learn more. You might be able to improve your model by",
+           "adding more predictors, preprocessing steps, you switching your model entirely!",sep=" ")
+   }),"Something went wrong here. Try changing the model to retrieve this output"))
+   if(metric()>=.85){
+      paste("Great Job! Your model has a max", metricname(),"of",paste(metric(),",",sep=""), 
+            "which is really good! Check out the confusion matrix to",
+            "the right to learn more.",sep=" ")
+   } else if(metric()<.85&metric()>=.70){
+      paste("This model is ok. Your model has a max", metricname(),"of",paste(metric(),",",sep=""), 
+            "which is a great start! Check out the confusion matrix to",
+            "the right to learn more.",sep=" ")
+   }else{
+      paste("Blech - this model is not great!. Your model has a max", metricname(),"of",
+            paste(metric(),",",sep=""), 
+            "which is pretty bad! Check out the confusion matrix to",
+            "the right to learn more. You might be able to improve your model by",
+            "adding more predictors, preprocessing steps, you switching your model entirely!",sep=" ")
+   }
+ })
+ #ModelPlot
+ output$tuneplot<-renderPlot({
+   validate(
+     need(try(plot(model())),"This model doesn't have tuning parameters")
+   )
+   plot(model())
+ })
+
+ #ROCPlot
+ output$ROCplot<-renderPlot({
+   validate(
+     need(try(colAUC(p_model_prob(),cat_class$Cat,plot=TRUE)),"We can't display ROC Plots for this model. Try switching selection AUROC")
+   )
+   colAUC(p_model_prob(),cat_class$Cat,plot=TRUE)
+ })
+ #Model Updating Table
+ metrictype<-reactive({
+   if(input$a_or_r=="Accuracy"){
+     "Accuracy"
+   }else{
+     "AUC"
+   }
+ })
+ mtd<-reactiveValues(
+   df=data.frame(Model_Number=c(),Model=c(),Metric=c(),Score=c()))
+new_table<-observeEvent(input$updatemodel,{
+  MN_new<-c(mtd$df$Model_Number,input$updatemodel)
+  M_new<-c(mtd$df$Model,input$model)
+  Me_new<-c(mtd$df$Metric,metrictype())
+  S_new<-c(mtd$df$Score,metric())
+  mtd$df<-data.frame(Model_Number=MN_new,
+                     Model=M_new,
+                     Metric=Me_new,
+                     Score=S_new)
+}) 
+ output$model_table<-renderTable(mtd$df)
+ ##Apply Model Page
+ am<-reactiveValues(
+    df=cat_class[round(runif(1,1,nrow(cat_class))),]
+ )
+ observeEvent(input$catcry,{
+    am$df<-cat_class[round(runif(1,1,nrow(cat_class))),]
+ })
+ output$mystery_cry<-renderTable(am$df[2:11])
+ pred_cat<-reactive({predict(model(),am$df,type="raw")})
+ output$predict<-renderImage({
+    if(pred_cat()=="Amelia"){
+       return(list(src="amelia_round.png",contentType = "image/png",style="text-align:center"))
+    } else{
+       return(list(src="james_round.png",contentType="image/png"))
+    }
+ },deleteFile = F)
+ output$jamesreveal<-renderImage({
+    if(am$df$Cat=="Amelia"){
+       return(list(src="amelia_round.png",contentType = "image/png",style="display:block;margin-right:auto;margin-left:auto"))
+    }else{
+       return(list(src="james_round.png",contentType="image/png"))
+    }
+ },deleteFile = F)
+ output$revealtext<-renderText({
+    if(am$df$Cat==pred_cat()){
+       "Great job! Your model predicted the right cat!"
+    }else{
+      paste("Oh no! Your model didn't predict the right cat.",
+            "You can try again by clicking 'Observe Call', or go",
+            "back to other page to build a new model",sep=" ")
+    }
+ })
+ #Description Page
+ output$headshot<-renderImage({
+    return(list(src="headshot.png"))
+ },deleteFile = FALSE)
+}
+
+shinyApp(ui=ui,server=server)
