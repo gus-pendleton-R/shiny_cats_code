@@ -315,7 +315,7 @@ ui<-dashboardPage(
             box(title="Here's the code I used to create this document:",
                 br(),br(),
                 actionButton(inputId="codelink",label="Access Code on Github",icon=icon("github"),
-                             onclick="window.open('','_blank')")),
+                             onclick="window.open('https://github.com/gus-pendleton-R/shiny_cats_code/blob/master/code','_blank')")),
     tabItem(tabName="intro",
             box(width=5,status="primary",height="500px",
                imageOutput("headshot")),
